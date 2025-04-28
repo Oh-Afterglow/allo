@@ -74,7 +74,7 @@ def recursive_collect_ops_by_name(
                 recursive_collect_ops_by_name(op, target_op_name, res_list)
 
 
-def build_dataflow_simulator(module: Module, top_func_name: str):
+def build_dataflow_simulator(module: Module, top_func_name: str, legacy: bool = True):
     with module.context, Location.unknown():
         func = find_func_in_module(module, top_func_name)
         assert isinstance(func.body, Region)
@@ -427,22 +427,40 @@ def build_dataflow_simulator(module: Module, top_func_name: str):
         assert isinstance(omp_parallel_op.region, Region)
         omp_parallel_block = Block.create_at_start(omp_parallel_op.region, [])
 
-        # Add `omp.sections`
-        ip_omp_parallel = InsertionPoint(omp_parallel_block)
-        omp_sections_op = openmp_d.SectionsOp([], [], [], [], ip=ip_omp_parallel)
-        omp_sections_block = Block.create_at_start(omp_sections_op.region, [])
-        openmp_d.TerminatorOp(ip=ip_omp_parallel)
+        if legacy:
+            # Add `omp.sections`
+            ip_omp_parallel = InsertionPoint(omp_parallel_block)
+            omp_sections_op = openmp_d.SectionsOp([], [], [], [], ip=ip_omp_parallel)
+            omp_sections_block = Block.create_at_start(omp_sections_op.region, [])
+            openmp_d.TerminatorOp(ip=ip_omp_parallel)
 
-        # Add `omp.section`s for PE calls
-        ip_omp_sections = InsertionPoint(omp_sections_block)
-        for call_op in pe_call_define_ops:
-            assert isinstance(call_op, OpView)
-            omp_section_op = openmp_d.SectionOp(ip=ip_omp_sections)
-            omp_section_block = Block.create_at_start(omp_section_op.region, [])
-            ip_omp_section = InsertionPoint(omp_section_block)
-            omp_term_op = openmp_d.TerminatorOp(ip=ip_omp_section)
-            call_op.operation.move_before(omp_term_op.operation)
-        openmp_d.TerminatorOp(ip=ip_omp_sections)
+            # Add `omp.section`s for PE calls
+            ip_omp_sections = InsertionPoint(omp_sections_block)
+            for call_op in pe_call_define_ops:
+                assert isinstance(call_op, OpView)
+                omp_section_op = openmp_d.SectionOp(ip=ip_omp_sections)
+                omp_section_block = Block.create_at_start(omp_section_op.region, [])
+                ip_omp_section = InsertionPoint(omp_section_block)
+                omp_term_op = openmp_d.TerminatorOp(ip=ip_omp_section)
+                call_op.operation.move_before(omp_term_op.operation)
+            openmp_d.TerminatorOp(ip=ip_omp_sections)
+        else:
+            # Add `omp.single` for the main thread
+            ip_omp_parallel = InsertionPoint(omp_parallel_block)
+            omp_single_op = openmp_d.SingleOp([], [], [], [], ip=ip_omp_parallel)
+            omp_single_block = Block.create_at_start(omp_single_op.region, [])
+            openmp_d.TerminatorOp(ip=ip_omp_parallel)
+            
+            # Add `omp.task` for PE calls
+            ip_omp_single = InsertionPoint(omp_single_block)
+            for call_op in pe_call_define_ops:
+                assert isinstance(call_op, OpView)
+                omp_task_op = openmp_d.TaskOp([], [], [], [], [], ip=ip_omp_single)
+                omp_task_block = Block.create_at_start(omp_task_op.region, [])
+                ip_omp_task = InsertionPoint(omp_task_block)
+                omp_term_op = openmp_d.TerminatorOp(ip=ip_omp_task)
+                call_op.operation.move_before(omp_term_op.operation)
+            openmp_d.TerminatorOp(ip=ip_omp_single)
 
 
 # This pass is only meant to run on fully lowered MLIR code
@@ -489,7 +507,7 @@ class LLVMOMPModule(LLVMModule):
             self.in_types, self.out_types = get_func_inputs_outputs(func)
             self.module = decompose_library_function(self.module)
 
-            build_dataflow_simulator(self.module, self.top_func_name)
+            build_dataflow_simulator(self.module, self.top_func_name, legacy=False)
             # Attach necessary attributes
             func = find_func_in_module(self.module, top_func_name)
             if func is None:
