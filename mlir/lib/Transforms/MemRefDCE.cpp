@@ -25,7 +25,11 @@ namespace allo {
 
 void cleanUpUnusedOps(func::FuncOp &func) {
   func.walk([&](Operation *op) {
-    if (op->getNumResults() != 0 && op->use_empty()) {
+    if (op->getNumResults() != 0 && op->use_empty() &&
+        !op->hasTrait<MemoryEffectOpInterface::Trait>() &&
+        !op->hasTrait<CallableOpInterface::Trait>() &&
+        !op->hasTrait<OpTrait::ZeroSuccessors>()) {
+      // Don't remove operations with side effects
       op->erase();
     }
   });

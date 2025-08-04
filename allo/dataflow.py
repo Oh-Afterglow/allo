@@ -19,7 +19,7 @@ from .customize import customize as _customize
 from .ir.utils import get_global_vars, get_all_df_kernels
 from .backend.aie import AIEModule
 
-from .backend.simulator import LLVMOMPModule
+from .backend.simulator import LLVMOMPModule, LLVMAsyncModule, LLVMCoroModule
 from .ir.types import Stream
 from .passes import df_pipeline
 
@@ -342,9 +342,15 @@ def build(
         )
         return aie_mod
 
-    if target == "simulator":
+    if target == "omp_simulator":
         s = customize(func, opt_default)
         return LLVMOMPModule(s.module, s.top_func_name)
+    if target == "async_simulator":
+        s = customize(func, opt_default)
+        return LLVMAsyncModule(s.module, s.top_func_name)
+    if target == "coro_simulator":
+        s = customize(func, opt_default)
+        return LLVMCoroModule(s.module, s.top_func_name)
     # FPGA backend
     s = customize(func, opt_default, enable_tensor=enable_tensor)
     hls_mod = s.build(

@@ -38,6 +38,24 @@ void deadStructConstructElimination(func::FuncOp &func) {
     auto structValue = op->getResult(0);
     if (structValue.use_empty()) {
       op->erase();
+    } else {
+      // TODO: check if there are only stores and erase them
+      bool deadStoreOnly = true;
+      for (auto user = structValue.user_begin(); user != structValue.user_end();
+           user++) {
+        auto storeOp = dyn_cast<affine::AffineStoreOp>(*user);
+        if (storeOp == nullptr) {
+          deadStoreOnly = false;
+          break;
+        }
+      }
+      if (deadStoreOnly) {
+        for (auto user = structValue.user_begin();
+             user != structValue.user_end(); user++) {
+          user->erase();
+        }
+        op->erase();
+      }
     }
   }
 }
@@ -76,14 +94,13 @@ void deadAffineLoadElimination(func::FuncOp &func) {
 
 void lowerStructType(func::FuncOp &func, ModuleOp &mod) {
   bool structAsArg = false;
-  std::map<mlir::detail::ValueImpl *, SmallVector<Value, 8>>
-      structMemRef2fieldMemRefs;
+  std::map<mlir::detail::ValueImpl *, SmallVector<Value, 10>> struct2fields;
   // First, process structs variables from function arguments
   Region::BlockArgListType funcArgs = func.getArguments();
   uint origFuncArgNum = funcArgs.size();
   FunctionType functionType = func.getFunctionType();
-  SmallVector<Type, 20> decomposedArgTypes =
-      llvm::to_vector<20>(func.getArgumentTypes()); // The argument type list
+  SmallVector<Type, 30> decomposedArgTypes =
+      llvm::to_vector<30>(func.getArgumentTypes()); // The argument type list
                                                     // after decomposing structs
   uint argInsertPos = funcArgs.size();
   std::map<uint, uint> structArgNo2memberArgStartNo;
@@ -120,24 +137,41 @@ void lowerStructType(func::FuncOp &func, ModuleOp &mod) {
         // All members are appended
         structArgNo2memberArgNum.insert(
             std::make_pair(structArgNo, argInsertPos - memberArgStartPos));
-        // The original struct argument is not removed yet here
       }
+    } else if (const StructType structArgType =
+                   argType.dyn_cast<StructType>()) {
+      // Struct passed as unwrapped value, instead of a memref
+      uint structArgNo = arg.getArgNumber();
+      uint memberArgStartPos = argInsertPos;
+      structArgNo2memberArgStartNo.insert(
+          std::make_pair(structArgNo, memberArgStartPos));
+      ArrayRef<Type> memberTypes = structArgType.getElementTypes();
+      for (const Type memberType :
+           memberTypes) { // Use the member types directly
+        functionBody.addArgument(memberType, func.getLoc());
+        decomposedArgTypes.push_back(memberType);
+        argInsertPos++;
+      }
+      structArgNo2memberArgNum.insert(
+          std::make_pair(structArgNo, argInsertPos - memberArgStartPos));
     }
   }
+  // The original struct argument is not removed yet here
+
   // Further actions when struct arguments exist
   if (decomposedArgTypes.size() > origFuncArgNum) {
     structAsArg = true;
     // Collect the map between original struct arguments and newly added member
     // arguments
     for (auto pair : structArgNo2memberArgStartNo) {
-      SmallVector<Value, 8> memberArgs;
+      SmallVector<Value, 10> memberArgs;
       const BlockArgument &structArg = func.getArgument(pair.first);
       uint memberArgsNum = structArgNo2memberArgNum[pair.first];
       for (uint i = 0; i < memberArgsNum; i++) {
         const BlockArgument &memberArg = func.getArgument(i + pair.second);
         memberArgs.push_back(memberArg);
       }
-      structMemRef2fieldMemRefs.insert(
+      struct2fields.insert(
           std::make_pair(structArg.cast<Value>().getImpl(), memberArgs));
     }
   }
@@ -166,7 +200,16 @@ void lowerStructType(func::FuncOp &func, ModuleOp &mod) {
     // Load: we are operating on a memref of struct
     // Construct: we are operating on a struct value
     Operation *defOp = struct_value.getDefiningOp();
-    if (auto affine_load = dyn_cast<affine::AffineLoadOp>(defOp)) {
+    if (defOp == nullptr) {
+      // Case 0: Struct is an argument passed by value
+      // Just replace with the field argument
+      auto it = struct2fields.find(struct_value.getImpl());
+      assert(it != struct2fields.end());
+      auto fields = it->second;
+      Value replacement = fields[index];
+      struct_field.replaceAllUsesWith(replacement);
+      op->erase();
+    } else if (auto affine_load = dyn_cast<affine::AffineLoadOp>(defOp)) {
       // Case 1: defOp is loadOp from memref
       // Note: the idea to lower struct from memref is to
       // first create a memref for each struct field, and then
@@ -177,9 +220,9 @@ void lowerStructType(func::FuncOp &func, ModuleOp &mod) {
       // Step1: create memref for each field
       Value struct_memref = affine_load.getMemref();
       // Try to find field_memrefs associated with this struct_memref
-      SmallVector<Value, 4> field_memrefs;
-      auto it = structMemRef2fieldMemRefs.find(struct_memref.getImpl());
-      if (it == structMemRef2fieldMemRefs.end()) {
+      SmallVector<Value, 10> field_memrefs;
+      auto it = struct2fields.find(struct_memref.getImpl());
+      if (it == struct2fields.end()) {
         // Create a memref for each field
         OpBuilder builder(struct_memref.getDefiningOp());
         StructType struct_type = struct_value.getType().cast<StructType>();
@@ -193,7 +236,7 @@ void lowerStructType(func::FuncOp &func, ModuleOp &mod) {
               builder.create<memref::AllocOp>(loc, newMemRefType);
           field_memrefs.push_back(field_memref);
         }
-        structMemRef2fieldMemRefs.insert(
+        struct2fields.insert(
             std::make_pair(struct_memref.getImpl(), field_memrefs));
         erase_struct_construct = true;
       } else {
@@ -271,7 +314,6 @@ void lowerStructType(func::FuncOp &func, ModuleOp &mod) {
     // Update callers of this function
     // Reference:
     // https://github.com/llvm/llvm-project/blob/main/mlir/lib/Dialect/MemRef/Transforms/NormalizeMemRefs.cpp
-    llvm::SmallDenseSet<func::FuncOp, 8> funcOpsToUpdate;
     std::optional<SymbolTable::UseRange> symbolUses = func.getSymbolUses(mod);
     for (SymbolTable::SymbolUse symbolUse : *symbolUses) {
       Operation *userOp = symbolUse.getUser();
@@ -293,7 +335,7 @@ void lowerStructType(func::FuncOp &func, ModuleOp &mod) {
         if (MemRefType memrefType = dyn_cast<MemRefType>(type)) {
           if (StructType structType =
                   dyn_cast<StructType>(memrefType.getElementType())) {
-            // Struct param found
+            // Struct memref param found
             // Find the last store to the memref<struct> before the call
             // to locate the StructConstruct op
             Value::user_range memrefUses = value.getUsers();
@@ -313,6 +355,28 @@ void lowerStructType(func::FuncOp &func, ModuleOp &mod) {
             for (const Value &member : origMembers) {
               parameters.append(member);
             }
+          }
+        } else if (StructType structType = dyn_cast<StructType>(type)) {
+          // Struct param found
+          // Find the StructConstructOp (should remain until here)
+          auto defOp = value.getDefiningOp();
+          if (defOp == nullptr) {
+            llvm_unreachable("Not implemented yet: Struct passed through "
+                             "nested functions\n");
+          } else if (auto structConOp = dyn_cast<StructConstructOp>(defOp)) {
+            // The struct is directly from a StructConstructOp
+            Operation::operand_range origMembers = structConOp->getOperands();
+            // Pass the original members of the struct
+            for (const Value &member : origMembers) {
+              parameters.append(member);
+            }
+          } else if (auto affineLoadOp =
+                         dyn_cast<affine::AffineLoadOp>(defOp)) {
+            llvm_unreachable(
+                "Not implemented yet: Struct is loaded from memref\n");
+          } else {
+            llvm_unreachable(
+                "Unexpected defOp for struct parameter in function call\n");
           }
         }
       }
