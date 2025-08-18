@@ -27,7 +27,6 @@ from .._mlir.ir import (
     IntegerAttr,
     Attribute,
     ArrayAttr,
-    DenseI8ArrayAttr,
     DenseI32ArrayAttr,
     DenseIntElementsAttr,
     FlatSymbolRefAttr,
@@ -39,7 +38,6 @@ from .._mlir.ir import (
     IntegerType,
     FloatType,
     IndexType,
-    VectorType,
 )
 from .._mlir.dialects import (
     allo as allo_d,
@@ -50,7 +48,6 @@ from .._mlir.dialects import (
     arith as arith_d,
     index as index_d,
     affine as affine_d,
-    vector as vector_d,
     scf as scf_d,
     cf as cf_d,
     llvm as llvm_d,
@@ -546,7 +543,6 @@ class LLVMOMPModule(LLVMModule):
                 ")"
             )
             pm.run(self.module.operation)
-            # print(self.module)
             # Lower StructType
             allo_d.lower_composite_type(self.module)
             # Reference: https://discourse.llvm.org/t/help-lowering-affine-loop-to-openmp/72441/9
@@ -927,7 +923,7 @@ def build_async_dataflow_simulator(module: Module, top_func_name: str, debug=Fal
                         ip=replace_ip,
                     )
                     # If full, create a new token
-                    # TODO: how to replace token atomically?
+                    # Can't replace token atomically...
                     if_full_op = scf_d.IfOp(cond=cmp_head_tail_op, ip=replace_ip)
                     if_full_ip = InsertionPoint(if_full_op.then_block)
                     # Drop reference of the old token to destroy it
@@ -1100,7 +1096,6 @@ def build_async_dataflow_simulator(module: Module, top_func_name: str, debug=Fal
                         ip=replace_ip,
                     )  # Empty: tail == new head
                     # If empty, create a new token to block the next get
-                    # TODO: atomic
                     if_empty_op = scf_d.IfOp(cond=check_empty_op, ip=replace_ip)
                     if_empty_ip = InsertionPoint(if_empty_op.then_block)
                     if debug:
@@ -1271,7 +1266,6 @@ class LLVMAsyncModule(LLVMModule):
                 )
             func.attributes["llvm.emit_c_interface"] = UnitAttr.get()
             func.attributes["top"] = UnitAttr.get()
-            # print(self.module)
 
             # Start lowering
             # Lower linalg for AIE
@@ -1299,7 +1293,6 @@ class LLVMAsyncModule(LLVMModule):
                 ")"
             )
             pm.run(self.module.operation)
-            # print(self.module)
 
             assert os.getenv("LLVM_BUILD_DIR") is not None, "LLVM_BUILD_DIR is not set"
             shared_libs = [
@@ -1335,22 +1328,6 @@ def build_coroutine_dataflow_simulator(module: Module, top_func_name: str):
         )
         llvm_d.GlobalOp(
             global_type=string_type,
-            sym_name=StringAttr.get(".str_producer_debug"),
-            linkage=Attribute.parse("#llvm.linkage<private>"),
-            constant=True,
-            value=StringAttr.get(b"Producer: %d %d\n\00"),
-            ip=module_ip,
-        )
-        llvm_d.GlobalOp(
-            global_type=string_type,
-            sym_name=StringAttr.get(".str_consumer_debug"),
-            linkage=Attribute.parse("#llvm.linkage<private>"),
-            constant=True,
-            value=StringAttr.get(b"Consumer: %d %d\n\00"),
-            ip=module_ip,
-        )
-        llvm_d.GlobalOp(
-            global_type=string_type,
             sym_name=StringAttr.get(".str_producer_block_debug"),
             linkage=Attribute.parse("#llvm.linkage<private>"),
             constant=True,
@@ -1365,12 +1342,65 @@ def build_coroutine_dataflow_simulator(module: Module, top_func_name: str):
             value=StringAttr.get(b"Consumer block \n\00"),
             ip=module_ip,
         )
+        llvm_d.GlobalOp(
+            global_type=string_type,
+            sym_name=StringAttr.get(".str_coro_not_done"),
+            linkage=Attribute.parse("#llvm.linkage<private>"),
+            constant=True,
+            value=StringAttr.get(b"Not done       \n\00"),
+            ip=module_ip,
+        )
+        llvm_d.GlobalOp(
+            global_type=string_type,
+            sym_name=StringAttr.get(".str_coro_suspended"),
+            linkage=Attribute.parse("#llvm.linkage<private>"),
+            constant=True,
+            value=StringAttr.get(b"Suspended      \n\00"),
+            ip=module_ip,
+        )
+        llvm_d.GlobalOp(
+            global_type=string_type,
+            sym_name=StringAttr.get(".str_coro_not_suspended"),
+            linkage=Attribute.parse("#llvm.linkage<private>"),
+            constant=True,
+            value=StringAttr.get(b"Not suspended  \n\00"),
+            ip=module_ip,
+        )
+        llvm_d.GlobalOp(
+            global_type=string_type,
+            sym_name=StringAttr.get(".str_fifo_ready"),
+            linkage=Attribute.parse("#llvm.linkage<private>"),
+            constant=True,
+            value=StringAttr.get(b"FIFO ready     \n\00"),
+            ip=module_ip,
+        )
+        llvm_d.GlobalOp(
+            global_type=string_type,
+            sym_name=StringAttr.get(".str_fifo_not_ready"),
+            linkage=Attribute.parse("#llvm.linkage<private>"),
+            constant=True,
+            value=StringAttr.get(b"FIFO not ready \n\00"),
+            ip=module_ip,
+        )
+        llvm_d.GlobalOp(
+            global_type=string_type,
+            sym_name=StringAttr.get(".str_int"),
+            linkage=Attribute.parse("#llvm.linkage<private>"),
+            constant=True,
+            value=StringAttr.get(b"%d %d %d %d    \n\00"),
+            ip=module_ip,
+        )
 
+        """ 
+        =========================
+        Insert external functions
+        =========================
+        """
         module_ip = InsertionPoint.at_block_begin(module.body)
         llvm_ptr_type = Type.parse("!llvm.ptr")
         alloc_func_type = TypeAttr.parse("!llvm.func<ptr (i64, i64)>")
         free_func_type = TypeAttr.parse("!llvm.func<void (ptr)>")
-        runtime_exec_func_type = TypeAttr.parse("!llvm.func<void (ptr, ptr)>")
+        # runtime_exec_func_type = TypeAttr.parse("!llvm.func<void (ptr, ptr)>")
         coro_resume_func_type = free_func_type
         llvm_d.LLVMFuncOp(
             sym_name=StringAttr.get("aligned_alloc"),
@@ -1380,12 +1410,18 @@ def build_coroutine_dataflow_simulator(module: Module, top_func_name: str):
         llvm_d.LLVMFuncOp(
             sym_name=StringAttr.get("free"), function_type=free_func_type, ip=module_ip
         )
-        llvm_d.LLVMFuncOp(
-            sym_name=StringAttr.get("mlirAsyncRuntimeExecute"),
-            function_type=runtime_exec_func_type,
-            sym_visibility="private",
-            ip=module_ip,
+        func_d.FuncOp(
+            name="mlirAsyncRuntimeExecute",
+            type=FunctionType.get(inputs=[llvm_ptr_type, llvm_ptr_type], results=[]),
+            visibility="private",
+            ip=module_ip
         )
+        # llvm_d.LLVMFuncOp(
+        #     sym_name=StringAttr.get("mlirAsyncRuntimeExecute"),
+        #     function_type=runtime_exec_func_type,
+        #     sym_visibility="private",
+        #     ip=module_ip,
+        # )
         resume_func = llvm_d.LLVMFuncOp(
             sym_name=StringAttr.get("__resume"),
             function_type=coro_resume_func_type,
@@ -1400,15 +1436,42 @@ def build_coroutine_dataflow_simulator(module: Module, top_func_name: str):
         )
         llvm_d.ReturnOp(ip=resume_ip)
 
-        # Construct Memref variables for pipes
+        """
+        ====================================
+        Construct Memref variables for pipes
+        ====================================
+        """
         stream_struct_table: dict[str, OpResult] = {}  # stream name: stream struct
         stream_type_table: dict[str, MemRefType] = {}
+        stream_index_map: dict[OpResult, int] = {}  # Assign each stream a number
+        cur_index = 1 # start from 1, negativeness matters
+        num_pes = len(stream_construct_ops)
 
         const_0_defined = False
         int32_type = IntegerType.get_signless(32)
         int64_type = IntegerType.get_signless(64)
         memref_scalar_int_type = MemRefType.get([], int32_type)
-        # Transform the stream definitions in the top function
+        memref_array_memref_type = MemRefType.get([num_pes+1], memref_scalar_int_type)
+        memref_array_int32_type = MemRefType.get([num_pes+1], int32_type)
+        if num_pes > 0:  # Keep heads and tails in an indexable list
+            first_stream_access_op = next(iter(stream_construct_ops.values()))
+            before_stream_access_ip = InsertionPoint(
+                beforeOperation=first_stream_access_op
+            )
+            stream_head_array_op = memref_d.AllocOp(
+                memref_array_memref_type, [], [], ip=before_stream_access_ip
+            )
+            stream_tail_array_op = memref_d.AllocOp(
+                memref_array_memref_type, [], [], ip=before_stream_access_ip
+            )
+            stream_size_array_op = memref_d.AllocOp(
+                memref_array_int32_type, [], [], ip=before_stream_access_ip
+            )
+        """ 
+        -------------------------------------------------------
+        1. Transform the stream definitions in the top function
+        -------------------------------------------------------
+        """
         for stream_access_op in stream_construct_ops.values():
             stream_name = stream_access_op.attributes["name"]
             stream_type = allo_d.StreamType(stream_access_op.result.type)
@@ -1417,6 +1480,7 @@ def build_coroutine_dataflow_simulator(module: Module, top_func_name: str):
             assert isinstance(stream_item_type, (MemRefType, IntegerType, FloatType))
             assert isinstance(stream_depth, int)
             ip = InsertionPoint(beforeOperation=stream_access_op)
+            # 1.1. Allocate memory for stream and its pointers
             if isinstance(stream_item_type, MemRefType):
                 item_element_type = stream_item_type.element_type
                 if not isinstance(item_element_type, (IntegerType, FloatType)):
@@ -1432,15 +1496,18 @@ def build_coroutine_dataflow_simulator(module: Module, top_func_name: str):
             stream_memref_op = memref_d.AllocOp(memref_stream_type, [], [], ip=ip)
             stream_head_op = memref_d.AllocOp(memref_scalar_int_type, [], [], ip=ip)
             stream_tail_op = memref_d.AllocOp(memref_scalar_int_type, [], [], ip=ip)
+            stream_size_op = arith_d.ConstantOp(
+                result=int32_type, value=stream_depth + 1, ip=ip
+            ) # Actual size
 
-            # Initialize head and tail value to 0
+            # 1.2. Initialize head and tail value to 0
             if not const_0_defined:
                 const_zero = arith_d.ConstantOp(int32_type, 0, ip=ip)
                 const_0_defined = True
             memref_d.StoreOp(const_zero, stream_head_op, [], ip=ip)
             memref_d.StoreOp(const_zero, stream_tail_op, [], ip=ip)
 
-            # Create structs
+            # 1.3. Create structs
             fifo_struct_type = allo_d.StructType.get(
                 members=[
                     memref_stream_type,  # FIFO
@@ -1469,11 +1536,39 @@ def build_coroutine_dataflow_simulator(module: Module, top_func_name: str):
             stream_struct_table[stream_name_str] = fifo_struct_op.result
             stream_type_table[stream_name_str] = memref_stream_type
 
-        # Transfrom the stream operations in function calls
+            # 1.4. Track stream index, both at compile time and runtime
+            stream_index_map[fifo_struct_op.result] = cur_index
+            const_cur_index_op = index_d.ConstantOp(value=cur_index, ip=ip)
+            memref_d.StoreOp(
+                value=stream_head_op,
+                memref=stream_head_array_op,
+                indices=[const_cur_index_op],
+                ip=ip,
+            )
+            memref_d.StoreOp(
+                value=stream_tail_op,
+                memref=stream_tail_array_op,
+                indices=[const_cur_index_op],
+                ip=ip,
+            )
+            memref_d.StoreOp(
+                value=stream_size_op,
+                memref=stream_size_array_op,
+                indices=[const_cur_index_op],
+                ip=ip,
+            )
+            cur_index += 1
+
+        """
+        ------------------------------------------------------------
+        2. Transfrom the stream put/get operations in function calls
+        ------------------------------------------------------------
+        """
         llvm_token_type = Type.parse("!llvm.token")
         bool_type = IntegerType.get_signless(1)
         int8_type = IntegerType.get_signless(8)
         for call_op, func_def_op in pe_call_define_ops.items():
+            # 2.1. Convert the function into a coroutine
             # Change function type, add the coro handle return value
             func_type = func_def_op.type
             coro_func_type = FunctionType.get(
@@ -1511,6 +1606,9 @@ def build_coroutine_dataflow_simulator(module: Module, top_func_name: str):
             llvm_const_1_32 = llvm_d.ConstantOp(
                 res=int32_type, value=IntegerAttr.get(int32_type, 1), ip=func_begin_ip
             )
+            llvm_const_2_32 = llvm_d.ConstantOp(
+                res=int32_type, value=IntegerAttr.get(int32_type, 2), ip=func_begin_ip
+            )
             llvm_const_minus1_32 = llvm_d.ConstantOp(
                 res=int32_type, value=IntegerAttr.get(int32_type, -1), ip=func_begin_ip
             )
@@ -1524,13 +1622,25 @@ def build_coroutine_dataflow_simulator(module: Module, top_func_name: str):
                 res=bool_type, value=IntegerAttr.get(bool_type, 1), ip=func_begin_ip
             )
             llvm_null_ptr = llvm_d.ZeroOp(res=llvm_ptr_type, ip=func_begin_ip)
+            # Promise: 2 int32 values
+            # promise[0]: stream index (positive for get, negative for put)
+            # promise[1]: suspend index
             promise_op = llvm_d.AllocaOp(
                 res=llvm_ptr_type,
-                arraySize=llvm_const_1_32,
+                arraySize=llvm_const_2_32,
                 elem_type=TypeAttr.get(int32_type),
                 ip=func_begin_ip,
             )
+            promise_1_addr_op = llvm_d.GEPOp(
+                res=llvm_ptr_type,
+                base=promise_op,
+                dynamicIndices=[],
+                rawConstantIndices=DenseI32ArrayAttr.get([1]),
+                elem_type=int32_type,
+                ip=func_begin_ip,
+            )
             llvm_d.StoreOp(value=llvm_const_0_32, addr=promise_op, ip=func_begin_ip)
+            llvm_d.StoreOp(value=llvm_const_0_32, addr=promise_1_addr_op, ip=func_begin_ip)
             llvm_coro_id_op = llvm_d.CoroIdOp(
                 res=llvm_token_type,
                 align=llvm_const_0_32,
@@ -1662,12 +1772,13 @@ def build_coroutine_dataflow_simulator(module: Module, top_func_name: str):
             func_d.ReturnOp(operands_=[coro_handle], ip=suspend_ip)
             # Operations in final "Suspend"
             llvm_d.StoreOp(
-                value=llvm_const_minus1_32, addr=promise_op, ip=final_suspend_ip
-            )
+                value=llvm_const_minus1_32, addr=promise_1_addr_op, ip=final_suspend_ip
+            ) # The suspend index becomes -1 in the final suspend
             cf_d.BranchOp(destOperands=[], dest=suspend_block, ip=final_suspend_ip)
 
-            # Get the correspondence between arguments and passed pipes
+            # 2.2. Get the correspondence between arguments and passed pipes
             arg_stream_table: dict[BlockArgument, str] = {}  # arg: stream name
+            arg_stream_index_map: dict[BlockArgument, int] = {}  # arg: stream index
             assert isinstance(call_op.operands_, OpOperandList)
             assert isinstance(func_def_op.arguments, BlockArgumentList)
             assert len(call_op.operands_) == len(func_def_op.arguments)
@@ -1677,8 +1788,12 @@ def build_coroutine_dataflow_simulator(module: Module, top_func_name: str):
                     if Value(stream_construct_op.result) == arg_instance:
                         arg_def = func_def_op.arguments[i]
                         arg_stream_table[arg_def] = stream_name
+            for arg, name in arg_stream_table.items():
+                stream_cons_res = stream_struct_table[name]
+                stream_index = stream_index_map[stream_cons_res]
+                arg_stream_index_map[arg] = stream_index
 
-            # Collect and replace `stream_get`s and `stream_put`s
+            # 2.3. Collect and replace `stream_get`s and `stream_put`s
             func_stream_ops = []
             recursive_collect_ops(
                 func_def_op, (allo_d.StreamGetOp, allo_d.StreamPutOp), func_stream_ops
@@ -1796,49 +1911,58 @@ def build_coroutine_dataflow_simulator(module: Module, top_func_name: str):
                 scf_d.YieldOp(results_=[], ip=InsertionPoint(resume_block))
                 llvm_d.UnreachableOp(ip=InsertionPoint(sub_cleanup_block))
                 sub_suspend_ip = InsertionPoint(sub_suspend_block)
-                # Debug
-                if func_def_op.name.value == "producer_0":
-                    str_const_addr_op = llvm_d.AddressOfOp(
-                        res=llvm_ptr_type,
-                        global_name=FlatSymbolRefAttr.get(".str_producer_block_debug"),
-                        ip=sub_suspend_ip,
-                    )
-                else:
-                    str_const_addr_op = llvm_d.AddressOfOp(
-                        res=llvm_ptr_type,
-                        global_name=FlatSymbolRefAttr.get(".str_consumer_block_debug"),
-                        ip=sub_suspend_ip,
-                    )
-                str_addr_op = llvm_d.GEPOp(
-                    res=llvm_ptr_type,
-                    base=str_const_addr_op,
-                    dynamicIndices=[],
-                    rawConstantIndices=DenseI32ArrayAttr.get([0]),
-                    elem_type=llvm_ptr_type,
-                    ip=sub_suspend_ip,
+                # # Debug
+                # if func_def_op.name.value == "producer_0":
+                #     str_const_addr_op = llvm_d.AddressOfOp(
+                #         res=llvm_ptr_type,
+                #         global_name=FlatSymbolRefAttr.get(".str_producer_block_debug"),
+                #         ip=sub_suspend_ip,
+                #     )
+                # else:
+                #     str_const_addr_op = llvm_d.AddressOfOp(
+                #         res=llvm_ptr_type,
+                #         global_name=FlatSymbolRefAttr.get(".str_consumer_block_debug"),
+                #         ip=sub_suspend_ip,
+                #     )
+                # str_addr_op = llvm_d.GEPOp(
+                #     res=llvm_ptr_type,
+                #     base=str_const_addr_op,
+                #     dynamicIndices=[],
+                #     rawConstantIndices=DenseI32ArrayAttr.get([0]),
+                #     elem_type=llvm_ptr_type,
+                #     ip=sub_suspend_ip,
+                # )
+                # llvm_d.CallOp(
+                #     result=int32_type,
+                #     callee_operands=[str_addr_op],
+                #     op_bundle_operands=[],
+                #     op_bundle_sizes=DenseI32ArrayAttr.get([]),
+                #     op_bundle_tags=None,
+                #     callee=FlatSymbolRefAttr.get("printf"),
+                #     var_callee_type=printf_func_type,
+                #     ip=sub_suspend_ip,
+                # )
+                # Update the promise value on suspend
+                old_suspend_index_load_op = llvm_d.LoadOp(
+                    res=int32_type, addr=promise_1_addr_op, ip=sub_suspend_ip
                 )
-                llvm_d.CallOp(
-                    result=int32_type,
-                    callee_operands=[str_addr_op],
-                    op_bundle_operands=[],
-                    op_bundle_sizes=DenseI32ArrayAttr.get([]),
-                    op_bundle_tags=None,
-                    callee=FlatSymbolRefAttr.get("printf"),
-                    var_callee_type=printf_func_type,
-                    ip=sub_suspend_ip,
-                )
-                # Increment the promise value on suspend
-                old_index_load_op = llvm_d.LoadOp(
-                    res=int32_type, addr=promise_op, ip=sub_suspend_ip
-                )
-                new_index_op = llvm_d.AddOp(
-                    lhs=old_index_load_op,
+                new_suspend_index_op = llvm_d.AddOp(
+                    lhs=old_suspend_index_load_op,
                     rhs=llvm_const_1_32,
                     overflowFlags=None,
+                    ip=sub_suspend_ip
+                )
+                llvm_d.StoreOp(value=new_suspend_index_op, addr=promise_1_addr_op, ip=sub_suspend_ip)
+                cur_stream_index = arg_stream_index_map[stream_struct]
+                if isinstance(stream_access_op, allo_d.StreamGetOp):
+                    cur_stream_index = -cur_stream_index
+                stream_index_const = llvm_d.ConstantOp(
+                    res=int32_type,
+                    value=IntegerAttr.get(int32_type, cur_stream_index),
                     ip=sub_suspend_ip,
                 )
-                new_index_store_op = llvm_d.StoreOp(
-                    value=new_index_op, addr=promise_op, ip=sub_suspend_ip
+                llvm_d.StoreOp(
+                    value=stream_index_const, addr=promise_op, ip=sub_suspend_ip
                 )
                 llvm_sub_none_op = llvm_d.NoneTokenOp(ip=sub_suspend_ip)
                 llvm_sub_end_op = llvm_d.CoroEndOp(
@@ -1858,30 +1982,6 @@ def build_coroutine_dataflow_simulator(module: Module, top_func_name: str):
                     cmp_op = arith_d.CmpIOp(
                         predicate=0, lhs=head_val_op, rhs=tail_next_op, ip=before_ip
                     )
-                    # # Debug
-                    # str_const_addr_op = llvm_d.AddressOfOp(
-                    #     res=llvm_ptr_type,
-                    #     global_name=FlatSymbolRefAttr.get(".str_producer_debug"),
-                    #     ip=before_ip,
-                    # )
-                    # str_addr_op = llvm_d.GEPOp(
-                    #     res=llvm_ptr_type,
-                    #     base=str_const_addr_op,
-                    #     dynamicIndices=[],
-                    #     rawConstantIndices=DenseI32ArrayAttr.get([0]),
-                    #     elem_type=llvm_ptr_type,
-                    #     ip=before_ip,
-                    # )
-                    # llvm_d.CallOp(
-                    #     result=int32_type,
-                    #     callee_operands=[str_addr_op, head_val_op, tail_val_op],
-                    #     op_bundle_operands=[],
-                    #     op_bundle_sizes=DenseI32ArrayAttr.get([]),
-                    #     op_bundle_tags=None,
-                    #     callee=FlatSymbolRefAttr.get("printf"),
-                    #     var_callee_type=printf_func_type,
-                    #     ip=before_ip,
-                    # )
                 else:
                     assert isinstance(stream_access_op, allo_d.StreamGetOp)
                     tail_val_op = memref_d.LoadOp(
@@ -1890,30 +1990,6 @@ def build_coroutine_dataflow_simulator(module: Module, top_func_name: str):
                     cmp_op = arith_d.CmpIOp(
                         predicate=0, lhs=head_val_op, rhs=tail_val_op, ip=before_ip
                     )
-                    # # Debug: print head and tail before awaiting
-                    # str_const_addr_op = llvm_d.AddressOfOp(
-                    #     res=llvm_ptr_type,
-                    #     global_name=FlatSymbolRefAttr.get(".str_consumer_debug"),
-                    #     ip=before_ip,
-                    # )
-                    # str_addr_op = llvm_d.GEPOp(
-                    #     res=llvm_ptr_type,
-                    #     base=str_const_addr_op,
-                    #     dynamicIndices=[],
-                    #     rawConstantIndices=DenseI32ArrayAttr.get([0]),
-                    #     elem_type=llvm_ptr_type,
-                    #     ip=before_ip,
-                    # )
-                    # llvm_d.CallOp(
-                    #     result=int32_type,
-                    #     callee_operands=[str_addr_op, head_val_op, tail_val_op],
-                    #     op_bundle_operands=[],
-                    #     op_bundle_sizes=DenseI32ArrayAttr.get([]),
-                    #     op_bundle_tags=None,
-                    #     callee=FlatSymbolRefAttr.get("printf"),
-                    #     var_callee_type=printf_func_type,
-                    #     ip=before_ip,
-                    # )
                 scf_d.ConditionOp(condition=cmp_op, args=[], ip=before_ip)
                 if isinstance(stream_access_op, allo_d.StreamPutOp):
                     # Begin store
@@ -2090,7 +2166,11 @@ def build_coroutine_dataflow_simulator(module: Module, top_func_name: str):
             call_op.operation.erase()
             handles.append(new_call_op)
 
-        # "Schedule" the tasks
+        '''
+        ====================
+        "Schedule" the tasks
+        ====================
+        '''
         num_pes = len(handles)
         llvm_const_false = llvm_d.ConstantOp(
             res=bool_type, value=IntegerAttr.get(bool_type, 0), ip=call_ip
@@ -2106,42 +2186,43 @@ def build_coroutine_dataflow_simulator(module: Module, top_func_name: str):
         )
         # For every task, start it for 1 time unconditionally
         for handle in handles:
-            llvm_d.CallOp(
-                result=None,
-                callee_operands=[handle, return_addr_op],
-                op_bundle_operands=[],
-                op_bundle_sizes=[],
-                op_bundle_tags=[],
-                callee=FlatSymbolRefAttr.get("mlirAsyncRuntimeExecute"),
-                ip=call_ip,
-            )
+            func_d.CallOp([], "mlirAsyncRuntimeExecute", [handle, return_addr_op], ip=call_ip)
+            # llvm_d.CallOp(
+            #     result=None,
+            #     callee_operands=[handle, return_addr_op],
+            #     op_bundle_operands=[],
+            #     op_bundle_sizes=[],
+            #     op_bundle_tags=[],
+            #     callee=FlatSymbolRefAttr.get("mlirAsyncRuntimeExecute"),
+            #     ip=execute_ip,
+            # )
+
         # Resume the tasks with the while loop logic
-        promise_tracks_vals = []
-        if not const_0_defined:
-            const_zero = arith_d.ConstantOp(int32_type, 0, ip=call_ip)
-        for i in range(num_pes):
-            promise_track = memref_d.AllocOp(memref_scalar_int_type, [], [], ip=call_ip)
-            memref_d.StoreOp(
-                value=const_zero,
-                memref=promise_track,
-                indices=[],
-                ip=call_ip,
-            )
-            promise_tracks_vals.append(promise_track)
-        coro_call_loop_op = scf_d.WhileOp(results_=[], inits=[], ip=call_ip)  # Do-While
+        # Only send a task to threadpool when it's accessing a ready FIFO
+        const_zero_i32 = arith_d.ConstantOp(int32_type, 0, ip=call_ip)
+        const_1_i32 = arith_d.ConstantOp(int32_type, 1, ip=call_ip)
+        llvm_const_1_32 = llvm_d.ConstantOp(int32_type, IntegerAttr.get(int32_type, 1), ip=call_ip)
+        llvm_const_0_32 = llvm_d.ConstantOp(
+            res=int32_type, value=IntegerAttr.get(int32_type, 0), ip=call_ip
+        )
+        tracked_suspend_index = [const_zero_i32] * num_pes
+        coro_call_loop_op = scf_d.WhileOp(
+            results_=[int32_type] * num_pes, inits=tracked_suspend_index, ip=call_ip
+        )  # Do-While
         assert isinstance(coro_call_loop_op.before, Region)
         assert isinstance(coro_call_loop_op.after, Region)
-        before_block = Block.create_at_start(coro_call_loop_op.before, [])
+        before_block = Block.create_at_start(
+            coro_call_loop_op.before, [int32_type] * num_pes
+        )
         before_ip = InsertionPoint(before_block)
-        after_block = Block.create_at_start(coro_call_loop_op.after, [])
+        after_block = Block.create_at_start(
+            coro_call_loop_op.after, [int32_type] * num_pes
+        )
         after_ip = InsertionPoint(after_block)
         # Resume each task in the before block
         for i in range(num_pes):
             handle = handles[i]
-            tracked_promise_val = promise_tracks_vals[i]
-            prev_promise_load_op = memref_d.LoadOp(
-                memref=tracked_promise_val, indices=[], ip=before_ip
-            )
+            old_suspend_index = before_block.arguments[i]
             cur_promise_op = llvm_d.CoroPromiseOp(
                 res=llvm_ptr_type,
                 handle=handle,
@@ -2149,48 +2230,156 @@ def build_coroutine_dataflow_simulator(module: Module, top_func_name: str):
                 align=const_zero,
                 ip=before_ip,
             )
-            cur_promise_load_op = llvm_d.LoadOp(
-                res=int32_type, addr=cur_promise_op, ip=before_ip
+            cur_stream_index_ptr = cur_promise_op.res
+            cur_suspend_index_ptr = llvm_d.GEPOp(
+                res=llvm_ptr_type,
+                base=cur_promise_op,
+                dynamicIndices=[],
+                rawConstantIndices=DenseI32ArrayAttr.get([1]),
+                elem_type=int32_type,
+                ip=before_ip
             )
+            cur_stream_index_load_op = llvm_d.LoadOp(
+                res=int32_type, addr=cur_stream_index_ptr, ip=before_ip
+            )
+            cur_suspend_index_load_op = llvm_d.LoadOp(
+                res=int32_type, addr=cur_suspend_index_ptr, ip=before_ip
+            )
+            '''
+            ------------------------------------
+            1. Check if the task is already done
+            ------------------------------------
+            '''
             this_not_done_cond = arith_d.CmpIOp(
-                predicate=1,  # ne
-                lhs=cur_promise_load_op,
+                predicate=arith_d.CmpIPredicate.ne,
+                lhs=cur_suspend_index_load_op,
                 rhs=llvm_const_minus1_32,
                 ip=before_ip,
             )
             if_not_done_op = scf_d.IfOp(
-                cond=this_not_done_cond, results_=[], ip=before_ip
+                cond=this_not_done_cond,
+                results_=[int32_type],
+                hasElse=True,
+                ip=before_ip,
             )
             if_not_done_ip = InsertionPoint(if_not_done_op.then_block)
+            if_done_ip = InsertionPoint(if_not_done_op.else_block)
+            '''
+            --------------------------------------------
+            2. If it's not done, check if it's suspended
+            --------------------------------------------
+            '''
             now_suspend_cond = arith_d.CmpIOp(
-                predicate=2,  # slt
-                lhs=prev_promise_load_op,
-                rhs=cur_promise_load_op,
+                predicate=arith_d.CmpIPredicate.ult,
+                lhs=old_suspend_index,
+                rhs=cur_suspend_index_load_op,
                 ip=if_not_done_ip,
-            )  # if the promise value become larger, the coro is suspended
+            )
+            # If the suspend index has become larger, the coro is suspended
             if_now_suspend_op = scf_d.IfOp(
-                cond=now_suspend_cond, results_=[], ip=if_not_done_ip
-            )  # if not done & suspended, resume the coroutine
+                cond=now_suspend_cond,
+                results_=[int32_type],
+                hasElse=True,
+                ip=if_not_done_ip,
+            )
             if_now_suspend_ip = InsertionPoint(if_now_suspend_op.then_block)
-            # Update the tracked promise value
-            memref_d.StoreOp(
-                value=cur_promise_load_op,
-                memref=tracked_promise_val,
-                indices=[],
+            if_not_suspend_ip = InsertionPoint(if_now_suspend_op.else_block)
+            '''
+            ------------------------------------------------------
+            3. If not done & suspended, check if the FIFO is ready
+            ------------------------------------------------------
+            '''
+            # 3.1. Extract the stream index and find the stream
+            stream_index_abs_op = llvm_d.AbsOp(
+                res=int32_type, 
+                in_=cur_stream_index_load_op, 
+                is_int_min_poison=0, 
+                ip=if_now_suspend_ip
+            )
+            stream_index_to_index_op = index_d.CastSOp(
+                output=IndexType.get(),
+                input=stream_index_abs_op,
+                ip=if_now_suspend_ip
+            )
+            head_ptr_op = memref_d.LoadOp(
+                memref=stream_head_array_op,
+                indices=[stream_index_to_index_op],
                 ip=if_now_suspend_ip,
             )
-            llvm_d.CallOp(
-                result=None,
-                callee_operands=[handle, return_addr_op],
-                op_bundle_operands=[],
-                op_bundle_sizes=[],
-                op_bundle_tags=[],
-                callee=FlatSymbolRefAttr.get("mlirAsyncRuntimeExecute"),
+            tail_ptr_op = memref_d.LoadOp(
+                memref=stream_tail_array_op,
+                indices=[stream_index_to_index_op],
                 ip=if_now_suspend_ip,
             )
-            scf_d.YieldOp([], ip=if_now_suspend_ip)
-            scf_d.YieldOp([], ip=if_not_done_ip)
-            # Update the state of coroutines
+            # 3.2. Load the head & tail
+            head_load_op = memref_d.LoadOp(
+                memref=head_ptr_op, indices=[], ip=if_now_suspend_ip
+            )
+            tail_load_op = memref_d.LoadOp(
+                memref=tail_ptr_op, indices=[], ip=if_now_suspend_ip
+            )
+            # 3.3. Compare differently for get/put
+            is_get_op = arith_d.CmpIOp(
+                predicate=arith_d.CmpIPredicate.sle,
+                lhs=cur_stream_index_load_op, rhs=llvm_const_0_32, ip=if_now_suspend_ip
+            )
+            if_is_get_op = scf_d.IfOp(
+                cond=is_get_op,
+                results_=[bool_type],
+                hasElse=True,
+                ip=if_now_suspend_ip,
+            )
+            is_put_ip = InsertionPoint(if_is_get_op.else_block)
+            is_get_ip = InsertionPoint(if_is_get_op.then_block)
+            # Check for stream_put, not full
+            size_load_op = memref_d.LoadOp(
+                memref=stream_size_array_op,
+                indices=[stream_index_to_index_op],
+                ip=is_put_ip,
+            )  # Load size only for put, since tail+1 needs to be checked
+            tail_plus_1_op = arith_d.AddIOp(
+                lhs=tail_load_op, rhs=const_1_i32, ip=is_put_ip
+            )
+            tail_mod_size_op = arith_d.RemUIOp(
+                lhs=tail_plus_1_op, rhs=size_load_op, ip=is_put_ip
+            )
+            cmp_result_op = arith_d.CmpIOp(
+                predicate=arith_d.CmpIPredicate.ne,
+                lhs=tail_mod_size_op,
+                rhs=head_load_op,
+                ip=is_put_ip,
+            )
+            scf_d.YieldOp(results_=[cmp_result_op], ip=is_put_ip)
+            # Check for stream_get, not empty
+            cmp_result_op = arith_d.CmpIOp(
+                predicate=arith_d.CmpIPredicate.ne,
+                lhs=tail_load_op,
+                rhs=head_load_op,
+                ip=is_get_ip,
+            )
+            scf_d.YieldOp(results_=[cmp_result_op], ip=is_get_ip)
+            # 4. Resume if the FIFO is ready
+            is_ready = if_is_get_op.results_[0]
+            assert isinstance(is_ready, OpResult)
+            if_is_ready_op = scf_d.IfOp(
+                cond=is_ready, results_=[int32_type], hasElse=True, ip=if_now_suspend_ip
+            )
+            is_ready_ip = InsertionPoint(if_is_ready_op.then_block)
+            not_ready_ip = InsertionPoint(if_is_ready_op.else_block)
+            func_d.CallOp([], "mlirAsyncRuntimeExecute", [handle, return_addr_op], ip=is_ready_ip)
+            
+            # 5. Update the tracked suspend index
+            # Only update if resumed, else use the old index
+            # Need to propagate the values through each layer of if operation
+            scf_d.YieldOp([cur_suspend_index_load_op], ip=is_ready_ip)
+            scf_d.YieldOp([old_suspend_index], ip=not_ready_ip)
+            scf_d.YieldOp([if_is_ready_op.results_[0]], ip=if_now_suspend_ip)
+            scf_d.YieldOp([old_suspend_index], ip=if_not_suspend_ip)
+            scf_d.YieldOp([if_now_suspend_op.results_[0]], ip=if_not_done_ip)
+            scf_d.YieldOp([old_suspend_index], ip=if_done_ip)
+            
+            # 6. Update the state of coroutines
+            tracked_suspend_index[i] = if_not_done_op.results_[0]
             if i == 0:
                 has_coro_not_done_op = this_not_done_cond
             else:
@@ -2199,9 +2388,9 @@ def build_coroutine_dataflow_simulator(module: Module, top_func_name: str):
                 )
                 has_coro_not_done_op = updated_not_done_op
         scf_d.ConditionOp(  # Proceed if not all coroutines have finished
-            condition=has_coro_not_done_op, args=[], ip=before_ip
+            condition=has_coro_not_done_op, args=tracked_suspend_index, ip=before_ip
         )
-        scf_d.YieldOp([], ip=after_ip)
+        scf_d.YieldOp([arg for arg in after_block.arguments], ip=after_ip)
         dummy_op.operation.erase()
 
 
@@ -2272,6 +2461,7 @@ class LLVMCoroModule(LLVMModule):
                 )
             func.attributes["llvm.emit_c_interface"] = UnitAttr.get()
             func.attributes["top"] = UnitAttr.get()
+            # print(self.module)
 
             # Start lowering
             # Lower linalg for AIE
